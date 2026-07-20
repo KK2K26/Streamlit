@@ -1146,4 +1146,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    st.sidebar.success(
+    "Version 20-Jul-2026 7:15 PM"
+)
+
     main()
