@@ -128,6 +128,8 @@ def load_data(file_path: str = EXCEL_FILE) -> pd.DataFrame:
 
     df["Status Clean"] = df["Status"].str.strip().str.title()
     df["Type Clean"] = df["Type"].str.strip().str.title()
+    # KEEP ONLY INCIDENTS
+    df = df[df["Type Clean"].eq("Incident")].copy()
 
     priority = df["Priority"].fillna("").astype(str).str.strip().str.upper()
 
