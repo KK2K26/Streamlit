@@ -1044,6 +1044,10 @@ def create_ticket_grid(df: pd.DataFrame) -> None:
         )
 
     display_df = detail_df.copy()
+    display_df["GLPI Link"] = (
+    "https://emea.glpi.kyndryl.com/front/ticket.form.php?id="
+    + display_df["ID"].astype(str)
+)
     display_df["Opening date"] = display_df["Opening date"].dt.strftime("%Y-%m-%d %H:%M:%S")
     display_df["Opening date"] = display_df["Opening date"].fillna("")
 
@@ -1060,7 +1064,33 @@ def create_ticket_grid(df: pd.DataFrame) -> None:
         suppressMenu=False,
     )
 
-    gb.configure_column("ID", pinned="left", width=110, checkboxSelection=True)
+    cell_renderer = JsCode("""
+class UrlCellRenderer {
+    init(params) {
+        this.eGui = document.createElement('a');
+        this.eGui.innerText = params.value;
+        this.eGui.href =
+            'https://emea.glpi.kyndryl.com/front/ticket.form.php?id='
+            + params.value;
+        this.eGui.target = '_blank';
+        this.eGui.style.color = '#0066cc';
+        this.eGui.style.textDecoration = 'underline';
+    }
+
+    getGui() {
+        return this.eGui;
+    }
+}
+""")
+
+    gb.configure_column(
+    "ID",
+    header_name="Ticket Number",
+    pinned="left",
+    width=280,
+    checkboxSelection=True,
+    cellRenderer=cell_renderer,
+)
     gb.configure_column("Title", width=280, tooltipField="Title")
     gb.configure_column("Assigned to - Assigned To", header_name="Assignee", width=200)
     gb.configure_column("Assigned to - Assignment Group", header_name="Assignment Group", width=230)
