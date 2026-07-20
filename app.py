@@ -42,7 +42,7 @@ AGING_COLUMNS = [
 ]
 
 STATUS_VALUES = ["New", "Pending", "Assigned"]
-TYPE_COLUMNS = ["Incident", "Request"]
+TYPE_COLUMNS = ["Incident"]
 PRIORITY_COLUMNS = ["P1", "P2", "P3", "P4"]
 
 DETAIL_COLUMNS = [
