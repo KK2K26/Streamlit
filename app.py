@@ -129,12 +129,29 @@ def load_data(file_path: str = EXCEL_FILE) -> pd.DataFrame:
     df["Status Clean"] = df["Status"].str.strip().str.title()
     df["Type Clean"] = df["Type"].str.strip().str.title()
 
-    df["Priority Clean"] = (
-        df["Priority"]
-        .str.upper()
-        .str.extract(r"(P[1-4])", expand=False)
-        .fillna(df["Priority"].str.upper())
-    )
+    priority = df["Priority"].fillna("").astype(str).str.strip().str.upper()
+
+    df["Priority Clean"] = "Other"
+
+    df.loc[
+        priority.isin(["VERY HIGH", "CRITICAL", "P1"]),
+        "Priority Clean",
+    ] = "P1"
+
+    df.loc[
+        priority.isin(["HIGH", "MEDIUM", "P2"]),
+        "Priority Clean",
+    ] = "P2"
+
+    df.loc[
+        priority.isin(["LOW", "P3"]),
+        "Priority Clean",
+    ] = "P3"
+
+    df.loc[
+        priority.isin(["VERY LOW", "P4"]),
+        "Priority Clean",
+    ] = "P4"
 
     closed_pattern = r"\b(closed|resolved|solved|cancelled|canceled|done|completed)\b"
 
@@ -148,11 +165,7 @@ def load_data(file_path: str = EXCEL_FILE) -> pd.DataFrame:
     df["Is Pending"] = df["Status Group"].eq("Pending")
     df["Is Assigned"] = df["Status Group"].eq("Assigned")
 
-    df["Is Critical"] = df["Priority"].str.upper().str.contains(
-        r"\b(P1|CRITICAL)\b",
-        regex=True,
-        na=False,
-    )
+    df["Is Critical"] = df["Priority Clean"].eq("P1")
 
     df["Is SLA Risk"] = df["SLA Aging Bucket"].isin(
         ["06_10 Days", "11_15 Days", "16_31 Days", "31_60 Days", ">60 Days"]
@@ -348,6 +361,7 @@ def init_state() -> None:
         "selected_filter_type": "all_open",
         "selected_filter_payload": {},
         "selected_filter_label": "Total Open Tickets",
+        "last_matrix_click": "",
     }
 
     for key, value in defaults.items():
@@ -359,6 +373,7 @@ def set_filter(filter_type: str, payload: dict | None = None, label: str | None 
     st.session_state["selected_filter_type"] = filter_type
     st.session_state["selected_filter_payload"] = payload or {}
     st.session_state["selected_filter_label"] = label or filter_type
+    st.session_state["last_matrix_click"] = f"{filter_type}_{payload}_{datetime.now().timestamp()}"
 
 
 def apply_selected_filter(df: pd.DataFrame) -> pd.DataFrame:
@@ -467,27 +482,6 @@ def export_to_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-def create_tooltip_text(df: pd.DataFrame, max_items: int = 15) -> str:
-    if df.empty:
-        return ""
-
-    temp = df[["ID", "Description"]].copy()
-    temp["ID"] = temp["ID"].fillna("").astype(str)
-    temp["Description"] = temp["Description"].fillna("").astype(str)
-
-    lines = []
-
-    for _, row in temp.head(max_items).iterrows():
-        desc = row["Description"].strip()
-
-        if len(desc) > 700:
-            desc = desc[:700] + "..."
-
-        lines.append(f"Ticket: {row['ID']}\n{desc}")
-
-    return "\n\n".join(lines)
-
-
 def build_matrix(
     df: pd.DataFrame,
     row_col: str,
@@ -499,10 +493,6 @@ def build_matrix(
         empty = pd.DataFrame(columns=[row_name] + value_columns + ["Total"])
         empty.loc[0] = ["Grand Total"] + ["_" for _ in value_columns] + ["_"]
         empty["_clicked_col"] = ""
-
-        for col in value_columns + ["Total"]:
-            empty[f"__tooltip__{col}"] = ""
-
         return empty
 
     matrix_numeric = (
@@ -535,31 +525,12 @@ def build_matrix(
 
     matrix_display = matrix_numeric.copy()
 
-    numeric_cols = value_columns + ["Total"]
-
-    for col in numeric_cols:
+    for col in value_columns + ["Total"]:
         matrix_display[col] = matrix_display[col].apply(
             lambda x: "_" if pd.isna(x) or int(x) == 0 else int(x)
         )
 
     matrix_display["_clicked_col"] = ""
-
-    for col in numeric_cols:
-        tooltip_col = f"__tooltip__{col}"
-        matrix_display[tooltip_col] = ""
-
-        for idx, row in matrix_display.iterrows():
-            group_value = row[row_name]
-
-            if group_value == "Grand Total":
-                filtered = df.copy()
-            else:
-                filtered = df[df[row_col].eq(group_value)].copy()
-
-            if col != "Total":
-                filtered = filtered[filtered[col_col].eq(col)].copy()
-
-            matrix_display.at[idx, tooltip_col] = create_tooltip_text(filtered)
 
     return matrix_display
 
@@ -574,10 +545,12 @@ def extract_aggrid_cell(response: dict, group_col: str = "Assigned Group") -> tu
         if rows.empty:
             return None, None
         row = rows.iloc[0].to_dict()
+
     elif isinstance(rows, list):
         if len(rows) == 0:
             return None, None
         row = rows[0]
+
     else:
         return None, None
 
@@ -630,12 +603,11 @@ def render_matrix_grid(
                 "cursor": "pointer",
             },
         )
-        gb.configure_column(f"__tooltip__{col}", hide=True)
 
     gb.configure_selection(
         selection_mode="single",
         use_checkbox=False,
-        suppressRowDeselection=False,
+        suppressRowDeselection=True,
     )
 
     gb.configure_grid_options(
@@ -644,10 +616,10 @@ def render_matrix_grid(
         suppressRowClickSelection=False,
         enableCellTextSelection=True,
         ensureDomOrder=True,
-        tooltipShowDelay=0,
         onCellClicked=JsCode(
             """
             function(params) {
+                params.api.deselectAll();
                 params.data._clicked_col = params.column.getColId();
                 params.node.setSelected(true);
                 params.api.applyTransaction({ update: [params.data] });
@@ -771,23 +743,24 @@ def create_aging_matrix(df: pd.DataFrame) -> None:
 
     group, bucket = extract_aggrid_cell(response)
 
-    current_filter = st.session_state.get("selected_filter_payload", {})
+    if group and bucket and bucket in AGING_COLUMNS + ["Total"]:
+        new_filter = {
+            "group": group,
+            "bucket": bucket,
+        }
 
-    new_filter = {
-        "group": group,
-        "bucket": bucket,
-    }
+        if (
+            st.session_state.get("selected_filter_type") != "aging_matrix"
+            or st.session_state.get("selected_filter_payload") != new_filter
+        ):
+            set_filter(
+                "aging_matrix",
+                new_filter,
+                f"Aging Ticket Status | {group} | {bucket}",
+            )
+            st.rerun()
 
-    if current_filter != new_filter:
-        set_filter(
-            "aging_matrix",
-            new_filter,
-            f"Aging Ticket Status | {group} | {bucket}",
-        )
-        st.rerun()
-
-
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def create_status_pie(df: pd.DataFrame) -> None:
@@ -860,11 +833,18 @@ def create_status_pie(df: pd.DataFrame) -> None:
             status_label = points[0].get("label")
 
             if status_label in STATUS_VALUES:
-                set_filter(
-                    "status",
-                    {"status": status_label},
-                    f"Status | {status_label}",
-                )
+                new_filter = {"status": status_label}
+
+                if (
+                    st.session_state.get("selected_filter_type") != "status"
+                    or st.session_state.get("selected_filter_payload") != new_filter
+                ):
+                    set_filter(
+                        "status",
+                        new_filter,
+                        f"Status | {status_label}",
+                    )
+                    st.rerun()
 
     except Exception:
         pass
@@ -915,11 +895,21 @@ def create_dynatrace_section(df: pd.DataFrame) -> None:
     group, bucket = extract_aggrid_cell(response)
 
     if group and bucket and bucket in sla_bucket_columns + ["Total"]:
-        set_filter(
-            "dynatrace_matrix",
-            {"group": group, "bucket": bucket},
-            f"Dynatrace Tickets | {group} | {bucket}",
-        )
+        new_filter = {
+            "group": group,
+            "bucket": bucket,
+        }
+
+        if (
+            st.session_state.get("selected_filter_type") != "dynatrace_matrix"
+            or st.session_state.get("selected_filter_payload") != new_filter
+        ):
+            set_filter(
+                "dynatrace_matrix",
+                new_filter,
+                f"Dynatrace Tickets | {group} | {bucket}",
+            )
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -947,11 +937,21 @@ def create_ticket_count_matrix(df: pd.DataFrame) -> None:
     group, ticket_type = extract_aggrid_cell(response)
 
     if group and ticket_type and ticket_type in TYPE_COLUMNS + ["Total"]:
-        set_filter(
-            "ticket_type_matrix",
-            {"group": group, "ticket_type": ticket_type},
-            f"Total Ticket Count | {group} | {ticket_type}",
-        )
+        new_filter = {
+            "group": group,
+            "ticket_type": ticket_type,
+        }
+
+        if (
+            st.session_state.get("selected_filter_type") != "ticket_type_matrix"
+            or st.session_state.get("selected_filter_payload") != new_filter
+        ):
+            set_filter(
+                "ticket_type_matrix",
+                new_filter,
+                f"Total Ticket Count | {group} | {ticket_type}",
+            )
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -979,11 +979,21 @@ def create_priority_matrix(df: pd.DataFrame) -> None:
     group, priority = extract_aggrid_cell(response)
 
     if group and priority and priority in PRIORITY_COLUMNS + ["Total"]:
-        set_filter(
-            "priority_matrix",
-            {"group": group, "priority": priority},
-            f"Current Priority | {group} | {priority}",
-        )
+        new_filter = {
+            "group": group,
+            "priority": priority,
+        }
+
+        if (
+            st.session_state.get("selected_filter_type") != "priority_matrix"
+            or st.session_state.get("selected_filter_payload") != new_filter
+        ):
+            set_filter(
+                "priority_matrix",
+                new_filter,
+                f"Current Priority | {group} | {priority}",
+            )
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
